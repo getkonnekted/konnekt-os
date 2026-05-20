@@ -367,6 +367,7 @@ const MobileProfile = ({
   onVcardClick,
   onQrClick,
   onShareClick,
+  onExchangeClick,
   onDashboardClick
 }: { 
   segment: UserSegment, 
@@ -379,6 +380,7 @@ const MobileProfile = ({
   onVcardClick?: () => void,
   onQrClick?: () => void,
   onShareClick?: () => void,
+  onExchangeClick?: () => void,
   onDashboardClick?: () => void
 }) => {
   const config = SEGMENTS[segment];
@@ -661,8 +663,16 @@ const MobileProfile = ({
            <button 
              onClick={onVcardClick}
              className="w-12 h-12 rounded-full text-white/40 hover:text-blue-400 hover:bg-white/5 flex items-center justify-center transition-all"
+             title="Save Contact"
            >
               <Download className="w-5 h-5" />
+           </button>
+           <button 
+             onClick={onExchangeClick}
+             className="w-12 h-12 rounded-full text-white/40 hover:text-emerald-400 hover:bg-white/5 flex items-center justify-center transition-all"
+             title="Exchange Contact"
+           >
+              <Handshake className="w-5 h-5" />
            </button>
            <button 
              onClick={onQrClick}
@@ -779,6 +789,12 @@ export default function App() {
   const [isWhatsappModalOpen, setIsWhatsappModalOpen] = useState(false);
   const [isVcardModalOpen, setIsVcardModalOpen] = useState(false);
   const [visitorWaNumber, setVisitorWaNumber] = useState('');
+  const [isContactExchangeOpen, setIsContactExchangeOpen] = useState(false);
+  const [exchangeContact, setExchangeContact] = useState({
+    name: '', company: '', phone: '', whatsapp: '', email: ''
+  });
+  const [exchangeSubmitting, setExchangeSubmitting] = useState(false);
+  const [exchangeSuccess, setExchangeSuccess] = useState(false);
 
   // Security & Billing State
   const [subscription, setSubscription] = useState<any>(null);
@@ -792,14 +808,7 @@ export default function App() {
   const [pendingUser, setPendingUser] = useState<any | null>(null);
 
   const generateVCard = (lProfile: any) => {
-    const vcard = `BEGIN:VCARD
-VERSION:3.0
-FN:${lProfile.displayName || lProfile.handle}
-N:;${lProfile.displayName || lProfile.handle};;;
-TEL;TYPE=CELL:${lProfile.phone || ''}
-EMAIL;TYPE=INTERNET:${lProfile.email || ''}
-URL:${window.location.origin}/${lProfile.handle}
-END:VCARD`;
+    const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${lProfile.displayName || lProfile.handle}\nN:;${lProfile.displayName || lProfile.handle};;;\nTEL;TYPE=CELL:${lProfile.phone || ''}\nEMAIL;TYPE=INTERNET:${lProfile.email || ''}\nURL:${window.location.origin}/${lProfile.handle}\nORG:${lProfile.business || ''}\nEND:VCARD`;
     const blob = new Blob([vcard], { type: 'text/vcard' });
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -808,6 +817,24 @@ END:VCARD`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleSaveContact = (lProfile: any) => {
+    const isMobile = /Mobile|Android|iP(hone|od)|IEMobile|BlackBerry/i.test(navigator.userAgent);
+    if (isMobile) {
+      // On mobile, use Web Contact API if available, otherwise vCard
+      const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${lProfile.displayName || lProfile.handle}\nN:;${lProfile.displayName || lProfile.handle};;;\nTEL;TYPE=CELL:${lProfile.phone || ''}\nEMAIL;TYPE=INTERNET:${lProfile.email || ''}\nURL:${window.location.origin}/${lProfile.handle}\nORG:${lProfile.business || ''}\nEND:VCARD`;
+      const blob = new Blob([vcard], { type: 'text/vcard' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${lProfile.handle}.vcf`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else {
+      generateVCard(lProfile);
+    }
   };
 
   const handleShare = async () => {
@@ -867,6 +894,42 @@ END:VCARD`;
       setIsWhatsappModalOpen(false);
     } catch (err) {
       console.error("Failed to save lead", err);
+    }
+  };
+
+  const handleContactExchange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!exchangeContact.name || !exchangeContact.phone) return;
+    const targetProfile = publicProfile || profile;
+    if (!targetProfile) return;
+
+    setExchangeSubmitting(true);
+    try {
+      // Save to database
+      await supabase.from('analytics').insert({
+        user_id: targetProfile.owner_id,
+        profile_handle: targetProfile.handle,
+        event_type: 'contact_exchange',
+        source: JSON.stringify(exchangeContact),
+        created_at: new Date().toISOString()
+      });
+
+      // Send to profile owner's WhatsApp
+      if (targetProfile.phone) {
+        const message = `🔔 New Contact Exchange from your Konnekt profile!\n\n👤 Name: ${exchangeContact.name}\n🏢 Company: ${exchangeContact.company || 'N/A'}\n📞 Phone: ${exchangeContact.phone}\n💬 WhatsApp: ${exchangeContact.whatsapp || exchangeContact.phone}\n📧 Email: ${exchangeContact.email || 'N/A'}\n\nThey viewed your profile at ${window.location.origin}/${targetProfile.handle}`;
+        window.open(`https://wa.me/${targetProfile.phone}?text=${encodeURIComponent(message)}`, '_blank');
+      }
+
+      setExchangeSuccess(true);
+      setTimeout(() => {
+        setIsContactExchangeOpen(false);
+        setExchangeSuccess(false);
+        setExchangeContact({ name: '', company: '', phone: '', whatsapp: '', email: '' });
+      }, 2500);
+    } catch (err) {
+      console.error("Contact exchange failed", err);
+    } finally {
+      setExchangeSubmitting(false);
     }
   };
 
@@ -1504,6 +1567,84 @@ END:VCARD`;
         </div>
       )}
 
+      {isContactExchangeOpen && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-6">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsContactExchangeOpen(false)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+          <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="relative w-full max-w-sm bg-dark-surface border border-white/10 rounded-[2.5rem] p-8 shadow-2xl text-white">
+            {exchangeSuccess ? (
+              <div className="text-center py-8 space-y-4">
+                <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 rounded-full flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-8 h-8 text-emerald-500" />
+                </div>
+                <h3 className="text-xl font-black">Contact Exchanged!</h3>
+                <p className="text-white/40 text-sm">Your details have been sent to {(publicProfile || profile)?.displayName}.</p>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h3 className="text-xl font-black">Exchange Contact</h3>
+                    <p className="text-white/40 text-xs mt-1">Share your details with {(publicProfile || profile)?.displayName}</p>
+                  </div>
+                  <button onClick={() => setIsContactExchangeOpen(false)} className="p-2 hover:bg-white/5 rounded-xl text-white/40"><X className="w-5 h-5" /></button>
+                </div>
+                <form onSubmit={handleContactExchange} className="space-y-3">
+                  <input
+                    required
+                    type="text"
+                    placeholder="Your Full Name *"
+                    value={exchangeContact.name}
+                    onChange={(e) => setExchangeContact({...exchangeContact, name: e.target.value})}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white placeholder:text-white/20 transition-colors"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Company / Business Name"
+                    value={exchangeContact.company}
+                    onChange={(e) => setExchangeContact({...exchangeContact, company: e.target.value})}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white placeholder:text-white/20 transition-colors"
+                  />
+                  <input
+                    required
+                    type="tel"
+                    placeholder="Phone Number * (e.g. +2348...)"
+                    value={exchangeContact.phone}
+                    onChange={(e) => setExchangeContact({...exchangeContact, phone: e.target.value})}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white placeholder:text-white/20 transition-colors"
+                  />
+                  <input
+                    type="tel"
+                    placeholder="WhatsApp Number (if different)"
+                    value={exchangeContact.whatsapp}
+                    onChange={(e) => setExchangeContact({...exchangeContact, whatsapp: e.target.value})}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white placeholder:text-white/20 transition-colors"
+                  />
+                  <input
+                    type="email"
+                    placeholder="Email Address"
+                    value={exchangeContact.email}
+                    onChange={(e) => setExchangeContact({...exchangeContact, email: e.target.value})}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white placeholder:text-white/20 transition-colors"
+                  />
+                  <button
+                    type="submit"
+                    disabled={exchangeSubmitting || !exchangeContact.name || !exchangeContact.phone}
+                    className="w-full py-4 bg-brand-primary text-white rounded-xl font-black text-sm shadow-xl shadow-brand-primary/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
+                  >
+                    {exchangeSubmitting ? (
+                      <span>Sending...</span>
+                    ) : (
+                      <><Handshake className="w-4 h-4" /> Exchange Contact</>
+                    )}
+                  </button>
+                  <p className="text-[10px] text-white/20 text-center">Your details will be sent to {(publicProfile || profile)?.displayName} via WhatsApp</p>
+                </form>
+              </>
+            )}
+          </motion.div>
+        </div>
+      )}
+
       {is2faChallengeOpen && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center p-6">
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black backdrop-blur-xl" />
@@ -1658,9 +1799,10 @@ END:VCARD`;
                links={publicLinks}
                currentUserId={user?.id ?? null}
                onWhatsappClick={() => setIsWhatsappModalOpen(true)}
-               onVcardClick={() => generateVCard(publicProfile)}
+               onVcardClick={() => handleSaveContact(publicProfile)}
                onQrClick={() => setIsQrModalOpen(true)}
                onShareClick={handleShare}
+               onExchangeClick={() => setIsContactExchangeOpen(true)}
                onDashboardClick={() => setView('LANDING')}
              />
              <div className="mt-12 text-center">
@@ -1834,42 +1976,15 @@ END:VCARD`;
               >
                 <NavContent />
                 {!user ? (
-  <div className="space-y-3">
-    {magicLinkSent ? (
-      <div className="w-full py-4 rounded-xl text-center text-emerald-400 font-bold text-sm bg-emerald-500/10 border border-emerald-500/20">
-        ✓ Check your email for the login link!
-      </div>
-    ) : (
-      <div className="space-y-2">
-        <input
-          type="email"
-          placeholder="your@email.com"
-          value={loginEmail}
-          onChange={(e) => setLoginEmail(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 text-white outline-none focus:border-brand-primary transition-colors placeholder:text-white/20"
-        />
-        <button
-          onClick={() => {
-  if (loginEmail) handleLogin();
-  setIsMenuOpen(false);
-}}
-className={`w-full py-4 rounded-xl font-black transition-all ${loginEmail ? 'bg-brand-primary text-white' : 'bg-brand-primary/30 text-white/40'}`}
-        >
-          Send Magic Link
-        </button>
-      </div>
-    )}
-    <button 
-      onClick={() => {
-        setView('ONBOARDING');
-        setIsMenuOpen(false);
-      }}
-      className="w-full bg-white text-black py-4 rounded-xl text-center font-black"
-    >
-      Get Started
-    </button>
-  </div>
+                  <button 
+                    onClick={() => {
+                      setView('ONBOARDING');
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full bg-white text-black py-4 rounded-xl text-center"
+                  >
+                    Get Started
+                  </button>
                 ) : (
                   <button 
                     onClick={() => {
