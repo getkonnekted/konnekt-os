@@ -1246,10 +1246,13 @@ END:VCARD`;
             }
 
             const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).single();
-            if (profileData) {
-              setProfile({ id: profileData.id, ...profileData });
-              if (window.location.pathname === '/onboarding') setView('DASHBOARD');
-            }
+if (profileData) {
+  setProfile({ id: profileData.id, ...profileData });
+  setView('DASHBOARD');
+} else {
+  // New user — send to onboarding
+  setView('ONBOARDING');
+}
           } catch (e) {
             handleDbError(e, OperationType.LIST, "profiles");
           }
