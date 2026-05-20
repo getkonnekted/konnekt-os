@@ -1248,10 +1248,15 @@ END:VCARD`;
             const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).maybeSingle();
 if (profileData) {
   setProfile({ id: profileData.id, ...profileData });
-  setView('DASHBOARD');
+  // Only redirect to dashboard if not already on a profile page
+  if (window.location.pathname === '/' || window.location.pathname === '/onboarding') {
+    setView('DASHBOARD');
+  }
 } else {
-  // New user — send to onboarding
-  setView('ONBOARDING');
+  // New user — send to onboarding only on first login
+  if (event === 'SIGNED_IN') {
+    setView('ONBOARDING');
+  }
 }
           } catch (e) {
             handleDbError(e, OperationType.LIST, "profiles");
