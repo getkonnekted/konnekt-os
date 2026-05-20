@@ -64,7 +64,7 @@ import {
   PieChart,
   Pie
 } from "recharts";
-import { supabase, signInWithGoogle, signOut, uploadAvatar } from "./lib/supabase";
+import { supabase, signInWithMagicLink, signOut, uploadAvatar } from "./lib/supabase";
 import {
   DndContext, 
   closestCenter,
@@ -1236,7 +1236,7 @@ END:VCARD`;
         if (u) {
           try {
             // Check for 2FA
-            const { data: secData } = await supabase.from('security').select('enabled, secret').eq('user_id', u.id).maybeSingle();
+            const { data: secData } = await supabase.from('security').select('enabled, secret').eq('user_id', u.id).single();
             if (secData?.enabled) {
               setPendingUser(u);
               setIs2faChallengeOpen(true);
@@ -1245,19 +1245,11 @@ END:VCARD`;
               setUser(u);
             }
 
-            const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).maybeSingle();
-if (profileData) {
-  setProfile({ id: profileData.id, ...profileData });
-  // Only redirect to dashboard if not already on a profile page
-  if (window.location.pathname === '/' || window.location.pathname === '/onboarding') {
-    setView('DASHBOARD');
-  }
-} else {
-  // New user — send to onboarding only on first login
-  if (event === 'SIGNED_IN') {
-    setView('ONBOARDING');
-  }
-}
+            const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).single();
+            if (profileData) {
+              setProfile({ id: profileData.id, ...profileData });
+              if (window.location.pathname === '/onboarding') setView('DASHBOARD');
+            }
           } catch (e) {
             handleDbError(e, OperationType.LIST, "profiles");
           }
@@ -1315,9 +1307,14 @@ if (profileData) {
     }
   }, [view, publicProfile]);
 
+  const [loginEmail, setLoginEmail] = useState('');
+  const [magicLinkSent, setMagicLinkSent] = useState(false);
+
   const handleLogin = async () => {
+    if (!loginEmail) return;
     try {
-      await signInWithGoogle();
+      await signInWithMagicLink(loginEmail);
+      setMagicLinkSent(true);
     } catch (e) {
       console.error("Login failed", e);
     }
@@ -1325,8 +1322,8 @@ if (profileData) {
 
   const handleCreateProfile = async () => {
     if (!user) {
-      await handleLogin();
-      return; // Wait for auth state change
+      setView('LANDING');
+      return;
     }
 
     const profileData = {
@@ -1775,25 +1772,42 @@ if (profileData) {
                   >
                     <BarChart3 className="w-4 h-4" /> Dashboard
                   </button>
-                  <div className="w-8 h-8 rounded-full border border-white/10 overflow-hidden">
-                    <img src={user.photoURL || ''} alt="" referrerPolicy="no-referrer" />
+                  <div className="w-8 h-8 rounded-full border border-white/10 overflow-hidden bg-brand-primary/20 flex items-center justify-center text-white text-xs font-bold">
+                    {user.email?.[0]?.toUpperCase() || 'U'}
                   </div>
                   <button onClick={() => signOut()} className="hidden md:block text-white/40 hover:text-white transition-colors"><LogOut className="w-4 h-4" /></button>
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
-                  <button 
-                    onClick={handleLogin}
-                    className="hidden md:block text-sm font-bold text-white/60 hover:text-white px-4 py-2 transition-colors"
-                  >
-                    Login
-                  </button>
-                  <button 
+                  {magicLinkSent ? (
+                    <span className="hidden md:block text-xs font-bold text-emerald-400 px-4 py-2">
+                      ✓ Check your email!
+                    </span>
+                  ) : (
+                    <div className="hidden md:flex items-center gap-2">
+                      <input
+                        type="email"
+                        placeholder="your@email.com"
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                        className="text-sm bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-white outline-none focus:border-brand-primary transition-colors w-48 placeholder:text-white/20"
+                      />
+                      <button
+                        onClick={handleLogin}
+                        disabled={!loginEmail}
+                        className="text-sm font-bold bg-white text-black px-5 py-2 rounded-lg hover:scale-105 transition-transform disabled:opacity-40"
+                      >
+                        Login
+                      </button>
+                    </div>
+                  )}
+                  <button
                     onClick={() => {
                       setView('ONBOARDING');
                       setIsMenuOpen(false);
                     }}
-                    className="hidden md:block text-sm font-bold bg-white text-black px-5 py-2 rounded-lg hover:scale-105 transition-transform"
+                    className="hidden md:block text-sm font-bold bg-brand-primary text-white px-5 py-2 rounded-lg hover:scale-105 transition-transform"
                   >
                     Get Started
                   </button>
@@ -2997,7 +3011,6 @@ if (profileData) {
                                   setTimeout(() => setSaveStatus(null), 3000);
                                 } catch (e) {
                                   handleDbError(e, OperationType.WRITE, `profiles/${profile.handle}`);
-                                  setLoading(false);
                                 }
                               }}
                               className="px-6 py-3 bg-brand-primary text-white rounded-xl font-bold flex items-center gap-2 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-brand-primary/20"
