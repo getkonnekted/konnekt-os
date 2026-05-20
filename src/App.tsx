@@ -1850,9 +1850,11 @@ END:VCARD`;
           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 text-white outline-none focus:border-brand-primary transition-colors placeholder:text-white/20"
         />
         <button
-          onClick={handleLogin}
-          disabled={!loginEmail}
-          className="w-full bg-brand-primary text-white py-4 rounded-xl font-black disabled:opacity-40"
+          onClick={() => {
+  if (loginEmail) handleLogin();
+  setIsMenuOpen(false);
+}}
+className={`w-full py-4 rounded-xl font-black transition-all ${loginEmail ? 'bg-brand-primary text-white' : 'bg-brand-primary/30 text-white/40'}`}
         >
           Send Magic Link
         </button>
