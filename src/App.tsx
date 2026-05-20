@@ -1236,7 +1236,7 @@ END:VCARD`;
         if (u) {
           try {
             // Check for 2FA
-            const { data: secData } = await supabase.from('security').select('enabled, secret').eq('user_id', u.id).single();
+            const { data: secData } = await supabase.from('security').select('enabled, secret').eq('user_id', u.id).maybeSingle();
             if (secData?.enabled) {
               setPendingUser(u);
               setIs2faChallengeOpen(true);
@@ -1245,7 +1245,7 @@ END:VCARD`;
               setUser(u);
             }
 
-            const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).single();
+            const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).maybeSingle();
 if (profileData) {
   setProfile({ id: profileData.id, ...profileData });
   setView('DASHBOARD');
@@ -2992,6 +2992,7 @@ if (profileData) {
                                   setTimeout(() => setSaveStatus(null), 3000);
                                 } catch (e) {
                                   handleDbError(e, OperationType.WRITE, `profiles/${profile.handle}`);
+                                  setLoading(false);
                                 }
                               }}
                               className="px-6 py-3 bg-brand-primary text-white rounded-xl font-bold flex items-center gap-2 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-brand-primary/20"
