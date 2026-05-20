@@ -1834,15 +1834,40 @@ END:VCARD`;
               >
                 <NavContent />
                 {!user ? (
-                  <button 
-                    onClick={() => {
-                      setView('ONBOARDING');
-                      setIsMenuOpen(false);
-                    }}
-                    className="w-full bg-white text-black py-4 rounded-xl text-center"
-                  >
-                    Get Started
-                  </button>
+  <div className="space-y-3">
+    {magicLinkSent ? (
+      <div className="w-full py-4 rounded-xl text-center text-emerald-400 font-bold text-sm bg-emerald-500/10 border border-emerald-500/20">
+        ✓ Check your email for the login link!
+      </div>
+    ) : (
+      <div className="space-y-2">
+        <input
+          type="email"
+          placeholder="your@email.com"
+          value={loginEmail}
+          onChange={(e) => setLoginEmail(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 text-white outline-none focus:border-brand-primary transition-colors placeholder:text-white/20"
+        />
+        <button
+          onClick={handleLogin}
+          disabled={!loginEmail}
+          className="w-full bg-brand-primary text-white py-4 rounded-xl font-black disabled:opacity-40"
+        >
+          Send Magic Link
+        </button>
+      </div>
+    )}
+    <button 
+      onClick={() => {
+        setView('ONBOARDING');
+        setIsMenuOpen(false);
+      }}
+      className="w-full bg-white text-black py-4 rounded-xl text-center font-black"
+    >
+      Get Started
+    </button>
+  </div>
                 ) : (
                   <button 
                     onClick={() => {
