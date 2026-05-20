@@ -48,7 +48,8 @@ import {
   Send,
   Phone,
   Mail,
-  Navigation
+  Navigation,
+  Compass
 } from "lucide-react";
 import { 
   AreaChart, 
@@ -64,7 +65,26 @@ import {
   PieChart,
   Pie
 } from "recharts";
-import { supabase, signInWithGoogle, signOut, uploadAvatar } from "./lib/supabase";
+import { auth, db, signInWithGoogle, storage } from "./lib/firebase";
+import { onAuthStateChanged, User as FirebaseUser, signOut } from "firebase/auth";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { 
+  setDoc, 
+  doc, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  getDoc,
+  orderBy, 
+  limit, 
+  serverTimestamp,
+  addDoc,
+  onSnapshot,
+  deleteDoc,
+  updateDoc,
+  writeBatch
+} from "firebase/firestore";
 import {
   DndContext, 
   closestCenter,
@@ -96,9 +116,26 @@ enum OperationType {
   WRITE = 'write',
 }
 
-function handleDbError(error: unknown, operationType: OperationType, path: string | null) {
-  console.error('DB Error: ', { error: error instanceof Error ? error.message : String(error), operationType, path });
-  throw new Error(error instanceof Error ? error.message : String(error));
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: any;
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
 }
 
 type UserSegment = 'SERVICE' | 'COMMERCE' | 'CORPORATE' | 'CREATOR';
@@ -356,13 +393,18 @@ const EmailSignature = ({ profile }: { profile: any }) => {
   );
 };
 
+const TikTokIcon = (props: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
+    <path d="M9 12a4 4 0 1 0 4 4V4a5 5 0 0 0 5 5" />
+  </svg>
+);
+
 const MobileProfile = ({ 
   segment, 
   handle, 
   isPreview = false, 
   profileData = null, 
   links = [],
-  currentUserId = null,
   onWhatsappClick,
   onVcardClick,
   onQrClick,
@@ -374,7 +416,6 @@ const MobileProfile = ({
   isPreview?: boolean, 
   profileData?: any, 
   links?: any[],
-  currentUserId?: string | null,
   onWhatsappClick?: () => void,
   onVcardClick?: () => void,
   onQrClick?: () => void,
@@ -391,12 +432,13 @@ const MobileProfile = ({
     if (isPreview) return;
     try {
       const meta = getVisitorMetadata();
-      await supabase.from('analytics').insert({
-        user_id: profileData?.owner_id || null,
-        profile_handle: currentHandle,
-        event_type: target.startsWith('link_') ? `link_:${target.split('_')[1]}` : target,
-        source: meta.source,
-        created_at: new Date().toISOString()
+      await addDoc(collection(db, "analytics"), {
+        userId: profileData?.ownerId || 'unknown',
+        profileHandle: currentHandle,
+        type: 'action',
+        target: target.startsWith('link_') ? `link_:${target.split('_')[1]}` : target,
+        ...meta,
+        timestamp: serverTimestamp()
       });
     } catch (e) {
       console.error("Engagement logging failed", e);
@@ -406,19 +448,21 @@ const MobileProfile = ({
   const isVideoCover = profileData?.coverUrl?.match(/\.(mp4|webm|ogg)$/) || profileData?.coverUrl?.includes('video');
 
   return (
-    <div className={`
-      w-full max-w-[340px] mx-auto ${theme.bg} rounded-[2.5rem] border-[8px] ${theme.border} 
+    <div className={isPreview ? `
+      w-full max-w-[340px] mx-auto ${theme.bg} ${theme.text} rounded-[2.5rem] border-[8px] ${theme.border} 
       shadow-2xl relative overflow-hidden flex flex-col font-sans h-[700px]
-      ${isPreview ? 'scale-90 md:scale-100 origin-top' : ''}
+      scale-90 md:scale-100 origin-top
+    ` : `
+      w-full max-w-xl mx-auto ${theme.bg} ${theme.text} min-h-screen relative flex flex-col font-sans shadow-2xl md:my-10 md:rounded-[2rem] md:border border-white/10 overflow-hidden
     `}>
-      {/* Scrollable Content Area */}
-      <div className="flex-1 overflow-y-auto no-scrollbar pb-32">
+      {/* Content Area */}
+      <div className={isPreview ? "flex-1 overflow-y-auto no-scrollbar pb-32" : "flex-1 pb-32"}>
         {/* Header/Cover Area */}
         <div className="relative h-48 bg-zinc-900 overflow-hidden">
            <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/60 to-transparent z-10" />
            
            {/* Edit Profile Button (Owner Only) */}
-           {!isPreview && profileData?.owner_id === currentUserId && (
+           {!isPreview && profileData?.ownerId === auth.currentUser?.uid && (
              <button 
                onClick={onDashboardClick}
                className="absolute top-6 right-6 z-30 px-4 py-2 bg-black/40 backdrop-blur-md border border-white/10 rounded-xl text-white text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:bg-brand-primary transition-all active:scale-95"
@@ -521,9 +565,39 @@ const MobileProfile = ({
               </div>
            </div>
         </div>
+         {/* Location Section */}
+        {profileData?.location && (
+          <div className="px-6 mt-6">
+             <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xs font-black text-white uppercase tracking-widest flex items-center gap-1.5">
+                   <MapPin className="w-3.5 h-3.5 text-brand-primary" /> Digital Map Locator
+                </h3>
+                <div className="h-px bg-white/5 flex-1 ml-4" />
+             </div>
+             <div className="rounded-2xl overflow-hidden border border-white/10 h-32 bg-zinc-900 relative group">
+                <iframe
+                  title="location-map"
+                  width="100%"
+                  height="100%"
+                  style={{ border: 0, filter: 'invert(90%) hue-rotate(180deg) brightness(95%) contrast(90%)' }}
+                  loading="lazy"
+                  allowFullScreen
+                  src={`https://maps.google.com/maps?q=${encodeURIComponent(profileData.location)}&t=&z=13&ie=UTF8&iwloc=&output=embed`}
+                />
+                <div className="absolute inset-0 bg-black/10 group-hover:bg-transparent transition-all pointer-events-none" />
+                <a 
+                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(profileData.location)}`} 
+                  target="_blank" 
+                  className="absolute bottom-2 right-2 px-3 py-1 bg-black/80 backdrop-blur-md border border-white/10 rounded-lg text-[9px] font-bold text-white uppercase tracking-wider hover:bg-brand-primary transition-all flex items-center gap-1"
+                >
+                   <ExternalLink className="w-3 h-3" /> External Map
+                </a>
+             </div>
+          </div>
+        )}
 
         {/* Social Links Section */}
-        {(profileData?.instagram || profileData?.linkedin || profileData?.phone) && (
+        {(profileData?.instagram || profileData?.linkedin || profileData?.phone || profileData?.twitter || profileData?.facebook || profileData?.tiktok) && (
           <div className="px-6 mt-12">
              <div className="flex items-center justify-between mb-6">
                 <h3 className="text-sm font-black text-white uppercase tracking-widest">Social Links</h3>
@@ -550,7 +624,43 @@ const MobileProfile = ({
                      </div>
                      <div className="flex-1">
                         <p className="text-xs font-bold text-white">LinkedIn</p>
-                        <p className="text-[10px] text-zinc-500">{profileData.displayName}</p>
+                        <p className="text-[10px] text-zinc-500">{profileData.displayName || profileData.linkedin}</p>
+                     </div>
+                     <ArrowRight className="w-4 h-4 text-white/10" />
+                  </a>
+                )}
+                {profileData?.twitter && (
+                  <a href={`https://twitter.com/${profileData.twitter}`} target="_blank" className="flex items-center gap-3 p-4 bg-white/5 border border-white/10 rounded-2xl hover:bg-white/10 transition-colors">
+                     <div className="w-10 h-10 rounded-xl bg-sky-500/10 flex items-center justify-center">
+                        <Twitter className="w-5 h-5 text-sky-400" />
+                     </div>
+                     <div className="flex-1">
+                        <p className="text-xs font-bold text-white">Twitter / X</p>
+                        <p className="text-[10px] text-zinc-500">@{profileData.twitter}</p>
+                     </div>
+                     <ArrowRight className="w-4 h-4 text-white/10" />
+                  </a>
+                )}
+                {profileData?.facebook && (
+                  <a href={`https://facebook.com/${profileData.facebook}`} target="_blank" className="flex items-center gap-3 p-4 bg-white/5 border border-white/10 rounded-2xl hover:bg-white/10 transition-colors">
+                     <div className="w-10 h-10 rounded-xl bg-blue-600/10 flex items-center justify-center">
+                        <Facebook className="w-5 h-5 text-blue-500" />
+                     </div>
+                     <div className="flex-1">
+                        <p className="text-xs font-bold text-white">Facebook</p>
+                        <p className="text-[10px] text-zinc-500">{profileData.facebook}</p>
+                     </div>
+                     <ArrowRight className="w-4 h-4 text-white/10" />
+                  </a>
+                )}
+                {profileData?.tiktok && (
+                  <a href={`https://tiktok.com/@${profileData.tiktok}`} target="_blank" className="flex items-center gap-3 p-4 bg-white/5 border border-white/10 rounded-2xl hover:bg-white/10 transition-colors">
+                     <div className="w-10 h-10 rounded-xl bg-rose-500/10 flex items-center justify-center">
+                        <TikTokIcon className="w-5 h-5 text-rose-400" />
+                     </div>
+                     <div className="flex-1">
+                        <p className="text-xs font-bold text-white">TikTok</p>
+                        <p className="text-[10px] text-zinc-500">@{profileData.tiktok}</p>
                      </div>
                      <ArrowRight className="w-4 h-4 text-white/10" />
                   </a>
@@ -628,7 +738,10 @@ const MobileProfile = ({
             <button 
               onClick={() => {
                 logEngagement('primary_cta');
-                if (profileData?.primaryCTAUrl) {
+                const btnText = profileData?.primaryCTAText || SEGMENTS[currentIntent as UserSegment].primaryCTA;
+                if (btnText === "Save Contact") {
+                  onVcardClick?.();
+                } else if (profileData?.primaryCTAUrl) {
                   window.open(profileData.primaryCTAUrl.startsWith('http') ? profileData.primaryCTAUrl : `https://${profileData.primaryCTAUrl}`, '_blank');
                 }
               }}
@@ -749,7 +862,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('The Pulse');
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [user, setUser] = useState<any | null>(null);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<any>(null);
   const [links, setLinks] = useState<any[]>([]);
@@ -780,6 +893,11 @@ export default function App() {
   const [isVcardModalOpen, setIsVcardModalOpen] = useState(false);
   const [visitorWaNumber, setVisitorWaNumber] = useState('');
 
+  // Contact Exchange State
+  const [isExchangeModalOpen, setIsExchangeModalOpen] = useState(false);
+  const [exchangeForm, setExchangeForm] = useState({ name: '', company: '', phone: '', whatsapp: '', email: '' });
+  const [isExchangeSubmitting, setIsExchangeSubmitting] = useState(false);
+
   // Security & Billing State
   const [subscription, setSubscription] = useState<any>(null);
   const [security, setSecurity] = useState<any>(null);
@@ -789,9 +907,10 @@ export default function App() {
   const [twoFactorToken, setTwoFactorToken] = useState("");
   const [is2faChallengeOpen, setIs2faChallengeOpen] = useState(false);
   const [challengeToken, setChallengeToken] = useState("");
-  const [pendingUser, setPendingUser] = useState<any | null>(null);
+  const [pendingUser, setPendingUser] = useState<FirebaseUser | null>(null);
 
   const generateVCard = (lProfile: any) => {
+    if (!lProfile) return;
     const vcard = `BEGIN:VCARD
 VERSION:3.0
 FN:${lProfile.displayName || lProfile.handle}
@@ -799,15 +918,32 @@ N:;${lProfile.displayName || lProfile.handle};;;
 TEL;TYPE=CELL:${lProfile.phone || ''}
 EMAIL;TYPE=INTERNET:${lProfile.email || ''}
 URL:${window.location.origin}/${lProfile.handle}
+NOTE:Digital business profile powered by Konnekt.ng
 END:VCARD`;
-    const blob = new Blob([vcard], { type: 'text/vcard' });
+
+    const blob = new Blob([vcard], { type: 'text/vcard;charset=utf-8' });
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `${lProfile.handle}.vcf`);
+    link.setAttribute('download', `${lProfile.handle || 'contact'}.vcf`);
     document.body.appendChild(link);
     link.click();
+    
+    // Smooth support for mobile devices
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (isMobile) {
+      setTimeout(() => {
+        const tempLink = document.createElement('a');
+        tempLink.href = url;
+        tempLink.target = '_blank';
+        tempLink.click();
+      }, 50);
+    }
+    
     document.body.removeChild(link);
+
+    // Open mutual Contact Exchange dialog
+    setIsExchangeModalOpen(true);
   };
 
   const handleShare = async () => {
@@ -824,12 +960,13 @@ END:VCARD`;
         // Log engagement if it's a public view
         if (publicProfile) {
           try {
-            await supabase.from('analytics').insert({
-              user_id: publicProfile.owner_id,
-              profile_handle: publicProfile.handle,
-              event_type: 'share_native',
-              source: getVisitorMetadata().source,
-              created_at: new Date().toISOString()
+            await addDoc(collection(db, "analytics"), {
+              userId: publicProfile.ownerId,
+              profileHandle: publicProfile.handle,
+              type: 'action',
+              target: 'share_native',
+              timestamp: serverTimestamp(),
+              ...getVisitorMetadata()
             });
           } catch (e) {
             console.error(e);
@@ -851,12 +988,10 @@ END:VCARD`;
     
     // Log lead
     try {
-      await supabase.from('analytics').insert({
-        user_id: profile.owner_id,
-        profile_handle: profile.handle,
-        event_type: 'whatsapp_lead',
-        source: 'direct',
-        created_at: new Date().toISOString()
+      await addDoc(collection(db, "profiles", profile.id, "leads"), {
+        type: 'whatsapp_request',
+        phoneNumber: visitorWaNumber,
+        timestamp: serverTimestamp()
       });
       
       // Open whatsapp with a pre-filled message from the visitor's side
@@ -867,6 +1002,43 @@ END:VCARD`;
       setIsWhatsappModalOpen(false);
     } catch (err) {
       console.error("Failed to save lead", err);
+    }
+  };
+
+  const handleExchangeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const activeProfile = publicProfile || profile;
+    if (!activeProfile || !activeProfile.id || !exchangeForm.name) return;
+    setIsExchangeSubmitting(true);
+
+    try {
+      // Save directly to the platform's database (Firestore leads vault)
+      await addDoc(collection(db, "profiles", activeProfile.id, "leads"), {
+        name: exchangeForm.name,
+        company: exchangeForm.company || '',
+        phone: exchangeForm.phone || '',
+        whatsapp: exchangeForm.whatsapp || '',
+        email: exchangeForm.email || '',
+        type: 'contact_exchange',
+        timestamp: serverTimestamp()
+      });
+
+      // Construct a premium mutual WhatsApp invitation message pre-loaded with details
+      const ownerPhone = activeProfile.phone || activeProfile.whatsapp || '';
+      const cleanPhone = ownerPhone.replace(/\D/g, '');
+      
+      if (cleanPhone) {
+        const textMessage = `Hello *${activeProfile.displayName || activeProfile.handle}*,\n\nI just saved your digital contact! Here are my details via Konnekt:\n\n👤 *Name*: ${exchangeForm.name}\n🏢 *Company*: ${exchangeForm.company || 'N/A'}\n📞 *Phone*: ${exchangeForm.phone || 'N/A'}\n💬 *WhatsApp*: ${exchangeForm.whatsapp || 'N/A'}\n✉️ *Email*: ${exchangeForm.email || 'N/A'}`;
+        window.open(`https://wa.me/${cleanPhone}?text=${encodeURIComponent(textMessage)}`, '_blank');
+      }
+
+      // Reset & close
+      setExchangeForm({ name: '', company: '', phone: '', whatsapp: '', email: '' });
+      setIsExchangeModalOpen(false);
+    } catch (err) {
+      console.error("Failed to submit contact exchange lead:", err);
+    } finally {
+      setIsExchangeSubmitting(false);
     }
   };
 
@@ -888,11 +1060,12 @@ END:VCARD`;
     setLinks(newLinks);
 
     try {
-      await Promise.all(
-        newLinks.map((link: any, idx: number) =>
-          supabase.from('links').update({ order: idx }).eq('id', link.id)
-        )
-      );
+      const batch = writeBatch(db);
+      newLinks.forEach((link: any, idx) => {
+        const linkRef = doc(db, "profiles", profile.id, "links", link.id);
+        batch.update(linkRef, { order: idx });
+      });
+      await batch.commit();
     } catch (e) {
       console.error("Failed to update links order", e);
     }
@@ -900,46 +1073,30 @@ END:VCARD`;
 
   useEffect(() => {
     if (!user) return;
-    // Initial fetch
-    supabase.from('analytics').select('*').eq('user_id', user.id).limit(500)
-      .then(({ data }) => { if (data) setAnalyticsData(data); });
-    // Realtime
-    const channel = supabase.channel('analytics_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'analytics', filter: `user_id=eq.${user.id}` },
-        () => {
-          supabase.from('analytics').select('*').eq('user_id', user.id).limit(500)
-            .then(({ data }) => { if (data) setAnalyticsData(data); });
-        }
-      ).subscribe();
-    return () => { supabase.removeChannel(channel); };
+    const q = query(collection(db, "analytics"), where("userId", "==", user.uid), limit(500));
+    const unsubscribe = onSnapshot(q, (snap) => {
+      const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setAnalyticsData(data);
+    });
+    return () => unsubscribe();
   }, [user]);
 
   useEffect(() => {
     if (!profile?.id) return;
-    supabase.from('links').select('*').eq('profile_id', profile.id).order('order', { ascending: true })
-      .then(({ data }) => { if (data) setLinks(data); });
-    const channel = supabase.channel('links_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'links', filter: `profile_id=eq.${profile.id}` },
-        () => {
-          supabase.from('links').select('*').eq('profile_id', profile.id).order('order', { ascending: true })
-            .then(({ data }) => { if (data) setLinks(data); });
-        }
-      ).subscribe();
-    return () => { supabase.removeChannel(channel); };
+    const q = query(collection(db, "profiles", profile.id, "links"), orderBy("order", "asc"));
+    const unsubscribe = onSnapshot(q, (snap) => {
+      setLinks(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
   }, [profile?.id]);
 
   useEffect(() => {
     if (!publicProfile?.id) return;
-    supabase.from('links').select('*').eq('profile_id', publicProfile.id).order('order', { ascending: true })
-      .then(({ data }) => { if (data) setPublicLinks(data); });
-    const channel = supabase.channel('public_links_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'links', filter: `profile_id=eq.${publicProfile.id}` },
-        () => {
-          supabase.from('links').select('*').eq('profile_id', publicProfile.id).order('order', { ascending: true })
-            .then(({ data }) => { if (data) setPublicLinks(data); });
-        }
-      ).subscribe();
-    return () => { supabase.removeChannel(channel); };
+    const q = query(collection(db, "profiles", publicProfile.id, "links"), orderBy("order", "asc"));
+    const unsubscribe = onSnapshot(q, (snap) => {
+      setPublicLinks(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
   }, [publicProfile?.id]);
 
   const handleGenerateBio = async () => {
@@ -969,7 +1126,7 @@ END:VCARD`;
     }
   };
 
-  const isPro = (p: any) => p?.plan === 'PRO' || p?.handle === 'okai';
+  const isPro = (p: any) => p?.plan === 'PRO' || p?.plan === 'BUSINESS' || p?.handle === 'okai';
   const isValidUrl = (url: string) => {
     try { 
       const u = url.startsWith('http') ? url : `https://${url}`;
@@ -987,7 +1144,7 @@ END:VCARD`;
       const res = await fetch("/api/2fa/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id })
+        body: JSON.stringify({ userId: user.uid })
       });
       const data = await res.json();
       setTwoFactorSetup(data);
@@ -1006,7 +1163,7 @@ END:VCARD`;
       const res = await fetch("/api/2fa/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id, token: twoFactorToken })
+        body: JSON.stringify({ userId: user.uid, token: twoFactorToken })
       });
       const data = await res.json();
       if (data.success) {
@@ -1030,7 +1187,7 @@ END:VCARD`;
       const res = await fetch("/api/2fa/challenge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: pendingUser.id, token: challengeToken })
+        body: JSON.stringify({ userId: pendingUser.uid, token: challengeToken })
       });
       const data = await res.json();
       if (data.success) {
@@ -1052,10 +1209,10 @@ END:VCARD`;
     if (!user) return;
     try {
       setIsAiLoading(true);
-      const res = await fetch("/api/billing/initialize", {
+      const res = await fetch("/api/billing/create-checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id, planId, userEmail: user.email })
+        body: JSON.stringify({ userId: user.uid, planId, userEmail: user.email })
       });
       const data = await res.json();
       if (data.url) {
@@ -1074,15 +1231,14 @@ END:VCARD`;
 
     try {
       if (editingLink.id) {
-        await supabase.from('links').update({
+        await updateDoc(doc(db, "profiles", profile.id, "links", editingLink.id), {
           title: editingLink.title,
           url: editingLink.url,
           type: editingLink.type || 'custom',
           order: editingLink.order ?? links.length
-        }).eq('id', editingLink.id);
+        });
       } else {
-        await supabase.from('links').insert({
-          profile_id: profile.id,
+        await addDoc(collection(db, "profiles", profile.id, "links"), {
           title: editingLink.title,
           url: editingLink.url,
           type: editingLink.type || 'custom',
@@ -1092,16 +1248,16 @@ END:VCARD`;
       setIsLinkModalOpen(false);
       setEditingLink(null);
     } catch (e) {
-      handleDbError(e, OperationType.WRITE, `links`);
+      handleFirestoreError(e, OperationType.WRITE, `profiles/${profile.id}/links`);
     }
   };
 
   const handleDeleteLink = async (linkId: string) => {
     if (!profile?.id) return;
     try {
-      await supabase.from('links').delete().eq('id', linkId);
+      await deleteDoc(doc(db, "profiles", profile.id, "links", linkId));
     } catch (e) {
-      handleDbError(e, OperationType.DELETE, `links/${linkId}`);
+      handleFirestoreError(e, OperationType.DELETE, `profiles/${profile.id}/links/${linkId}`);
     }
   };
 
@@ -1198,6 +1354,7 @@ END:VCARD`;
 
   useEffect(() => {
     const initApp = async () => {
+      // Check if we are on a profile path (e.g. /alex)
       const path = window.location.pathname.split('/').filter(Boolean);
       if (path.length === 1) {
         if (path[0] === 'dashboard') {
@@ -1207,54 +1364,62 @@ END:VCARD`;
         } else {
           const handle = path[0];
           try {
-            const { data } = await supabase.from('profiles').select('*').eq('handle', handle).single();
-            if (data) {
+            const path = "profiles";
+            const q = query(collection(db, path), where("handle", "==", handle), limit(1));
+            const snap = await getDocs(q);
+            if (!snap.empty) {
+              const data = snap.docs[0].data();
               setPublicProfile(data);
               setView('PROFILE');
+              
+              // Log a view event
               try {
+                const analyticsPath = "analytics";
                 const meta = getVisitorMetadata();
-                await supabase.from('analytics').insert({
-                  user_id: data.owner_id,
-                  profile_handle: data.handle,
-                  event_type: 'profile_view',
-                  source: meta.source,
-                  created_at: new Date().toISOString()
+                await addDoc(collection(db, analyticsPath), {
+                  userId: data.ownerId,
+                  profileHandle: data.handle,
+                  type: 'view',
+                  target: 'profile_view',
+                  ...meta,
+                  timestamp: serverTimestamp()
                 });
               } catch (err) {
                 console.warn("Silent analytics fail", err);
               }
             }
           } catch (e) {
-            handleDbError(e, OperationType.LIST, "profiles");
+            handleFirestoreError(e, OperationType.LIST, "profiles");
           }
         }
       }
 
-      // Supabase auth state listener
-      const { data: { subscription: authSub } } = supabase.auth.onAuthStateChange(async (event, session) => {
-        const u = session?.user ?? null;
+      onAuthStateChanged(auth, async (u) => {
         if (u) {
           try {
-            // Check for 2FA
-            const { data: secData } = await supabase.from('security').select('enabled, secret').eq('user_id', u.id).single();
+            // Check for 2FA using a safe single document getDoc fetch
+            const secDoc = await getDoc(doc(db, "users", u.uid, "private", "security"));
+            const secData = secDoc.exists() ? secDoc.data() : null;
+
             if (secData?.enabled) {
               setPendingUser(u);
               setIs2faChallengeOpen(true);
-              setUser(null);
+              setUser(null); 
             } else {
               setUser(u);
             }
 
-            const { data: profileData } = await supabase.from('profiles').select('*').eq('owner_id', u.id).single();
-if (profileData) {
-  setProfile({ id: profileData.id, ...profileData });
-  setView('DASHBOARD');
-} else {
-  // New user — send to onboarding
-  setView('ONBOARDING');
-}
+            const path = "profiles";
+            const q = query(collection(db, path), where("ownerId", "==", u.uid), limit(1));
+            const snap = await getDocs(q);
+            if (!snap.empty) {
+              const profileDoc = snap.docs[0];
+              setProfile({ id: profileDoc.id, ...profileDoc.data() });
+              if (window.location.pathname === '/onboarding') setView('DASHBOARD');
+            }
           } catch (e) {
-            handleDbError(e, OperationType.LIST, "profiles");
+            setLoading(false);
+            handleFirestoreError(e, OperationType.LIST, "profiles");
           }
         } else {
           setUser(null);
@@ -1264,8 +1429,6 @@ if (profileData) {
         }
         setLoading(false);
       });
-
-      return () => authSub.unsubscribe();
     };
 
     initApp();
@@ -1273,27 +1436,19 @@ if (profileData) {
 
   useEffect(() => {
     if (!user) return;
-    // Fetch billing and security
-    supabase.from('billing').select('*').eq('user_id', user.id).single()
-      .then(({ data }) => { if (data) setSubscription(data); });
-    supabase.from('security').select('*').eq('user_id', user.id).single()
-      .then(({ data }) => { if (data) setSecurity(data); });
-
-    // Realtime billing
-    const billingChannel = supabase.channel('billing_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'billing', filter: `user_id=eq.${user.id}` },
-        (payload) => { if (payload.new) setSubscription(payload.new); }
-      ).subscribe();
-
-    // Realtime security
-    const secChannel = supabase.channel('security_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'security', filter: `user_id=eq.${user.id}` },
-        (payload) => { if (payload.new) setSecurity(payload.new); }
-      ).subscribe();
+    
+    // System status listeners
+    const billingUnsub = onSnapshot(doc(db, "users", user.uid, "private", "billing"), (snap) => {
+      if (snap.exists()) setSubscription(snap.data());
+    });
+    
+    const securityUnsub = onSnapshot(doc(db, "users", user.uid, "private", "security"), (snap) => {
+      if (snap.exists()) setSecurity(snap.data());
+    });
 
     return () => {
-      supabase.removeChannel(billingChannel);
-      supabase.removeChannel(secChannel);
+      billingUnsub();
+      securityUnsub();
     };
   }, [user]);
 
@@ -1327,23 +1482,26 @@ if (profileData) {
     const profileData = {
       handle: onboarding.handle,
       intent: onboarding.intent,
-      primary_link: onboarding.primaryLink,
-      custom_cta_text: onboarding.customCTAText,
-      custom_cta_url: onboarding.customCTAUrl,
-      owner_id: user.id,
-      display_name: user.user_metadata?.full_name || onboarding.handle,
-      created_at: new Date().toISOString(),
+      primaryLink: onboarding.primaryLink,
+      customCTAText: onboarding.customCTAText,
+      customCTAUrl: onboarding.customCTAUrl,
+      ownerId: user.uid,
+      displayName: user.displayName || onboarding.handle,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     };
 
+    const path = `profiles/${onboarding.handle}`;
     try {
       const btn = document.getElementById('gen-btn');
       if (btn) btn.innerHTML = 'Provisioning...';
-      const { data, error } = await supabase.from('profiles').insert(profileData).select().single();
-      if (error) throw error;
-      setProfile({ id: data.id, ...data });
+      
+      await setDoc(doc(db, "profiles", onboarding.handle), profileData);
+      setProfile(profileData);
+      
       setTimeout(() => setOnboarding(prev => ({...prev, step: 4})), 1200);
     } catch (e) {
-      handleDbError(e, OperationType.WRITE, `profiles`);
+      handleFirestoreError(e, OperationType.WRITE, path);
     }
   };
 
@@ -1529,7 +1687,7 @@ if (profileData) {
                 </button>
                 <button 
                   onClick={() => {
-                    signOut();
+                    signOut(auth);
                     setIs2faChallengeOpen(false);
                   }}
                   className="text-white/20 text-[10px] font-bold uppercase tracking-widest hover:text-white transition-colors"
@@ -1639,6 +1797,112 @@ if (profileData) {
           </motion.div>
         </div>
       )}
+
+      {isExchangeModalOpen && (
+        <div className="fixed inset-0 z-[250] flex items-center justify-center p-4">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsExchangeModalOpen(false)} className="absolute inset-0 bg-black/85 backdrop-blur-md" />
+          <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="relative w-full max-w-sm bg-zinc-950 border border-white/10 rounded-[2.5rem] p-8 shadow-2xl shadow-black/80 text-white overflow-hidden max-h-[90vh] flex flex-col">
+             
+             {/* Header */}
+             <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5 shrink-0">
+                <div>
+                   <h3 className="text-xl font-black tracking-tight flex items-center gap-2">
+                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse inline-block"></span>
+                     Exchange Contacts
+                   </h3>
+                   <p className="text-[10px] text-white/40 font-bold uppercase tracking-widest mt-1">Direct Mutual Connect</p>
+                </div>
+                <button onClick={() => setIsExchangeModalOpen(false)} className="p-2 hover:bg-white/5 rounded-xl text-white/40 transition-colors"><X className="w-5 h-5" /></button>
+             </div>
+
+             <div className="flex-1 overflow-y-auto pr-1 space-y-6 text-left">
+                {/* Note */}
+                <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-300 text-xs flex items-start gap-3">
+                   <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-emerald-400" />
+                   <div>
+                     <p className="font-bold mb-0.5 text-[11px] uppercase tracking-wider text-emerald-400">Contact File Downloaded!</p>
+                     <p className="text-white/60 leading-relaxed">Open the downloaded file on your device to instantly save this contact card. Now, send back your details below so they can save yours too!</p>
+                   </div>
+                </div>
+
+                {/* Form */}
+                <form onSubmit={handleExchangeSubmit} className="space-y-4">
+                   <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Full Name *</label>
+                      <input 
+                        type="text" 
+                        required 
+                        placeholder="e.g. Kolawole Davies"
+                        value={exchangeForm.name} 
+                        onChange={(e) => setExchangeForm({...exchangeForm, name: e.target.value})}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3.5 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                      />
+                   </div>
+
+                   <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Company / Business Name</label>
+                      <input 
+                        type="text" 
+                        placeholder="e.g. Davies Tech Ventures"
+                        value={exchangeForm.company} 
+                        onChange={(e) => setExchangeForm({...exchangeForm, company: e.target.value})}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3.5 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                      />
+                   </div>
+
+                   <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                         <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Phone Number</label>
+                         <input 
+                           type="tel" 
+                           placeholder="e.g. +234..."
+                           value={exchangeForm.phone} 
+                           onChange={(e) => setExchangeForm({...exchangeForm, phone: e.target.value})}
+                           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3.5 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                         />
+                      </div>
+                      <div className="space-y-1.5">
+                         <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">WhatsApp Number</label>
+                         <input 
+                           type="tel" 
+                           placeholder="e.g. +234..."
+                           value={exchangeForm.whatsapp} 
+                           onChange={(e) => setExchangeForm({...exchangeForm, whatsapp: e.target.value})}
+                           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3.5 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                         />
+                      </div>
+                   </div>
+
+                   <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Email Address</label>
+                      <input 
+                        type="email" 
+                        placeholder="e.g. kola.davies@gmail.com"
+                        value={exchangeForm.email} 
+                        onChange={(e) => setExchangeForm({...exchangeForm, email: e.target.value})}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3.5 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                      />
+                   </div>
+
+                   <button 
+                     type="submit" 
+                     disabled={isExchangeSubmitting || !exchangeForm.name}
+                     className="w-full py-4 mt-4 bg-brand-primary hover:bg-brand-primary/90 text-white rounded-xl font-bold uppercase tracking-wider text-xs shadow-xl shadow-brand-primary/20 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50 transition-all cursor-pointer flex items-center justify-center gap-2"
+                   >
+                     {isExchangeSubmitting ? (
+                       <span>Sending Details...</span>
+                     ) : (
+                       <>
+                         <Send className="w-3.5 h-3.5" />
+                         <span>Exchange & Save Mutually</span>
+                       </>
+                     )}
+                   </button>
+                </form>
+             </div>
+          </motion.div>
+        </div>
+      )}
     </AnimatePresence>
   );
 
@@ -1654,7 +1918,6 @@ if (profileData) {
                handle={publicProfile.handle} 
                profileData={publicProfile} 
                links={publicLinks}
-               currentUserId={user?.id ?? null}
                onWhatsappClick={() => setIsWhatsappModalOpen(true)}
                onVcardClick={() => generateVCard(publicProfile)}
                onQrClick={() => setIsQrModalOpen(true)}
@@ -1696,10 +1959,64 @@ if (profileData) {
     }
 
     try {
-      setIsAiLoading(true);
-      const downloadURL = await uploadAvatar(user.id, file);
+      setIsAiLoading(true); // Using this as general loading
+      const storageRef = ref(storage, `avatars/${user.uid}/${Date.now()}_${file.name}`);
+      const snapshot = await uploadBytes(storageRef, file);
+      const downloadURL = await getDownloadURL(snapshot.ref);
       setProfile({ ...profile, avatarUrl: downloadURL });
       setSaveStatus('Photo Uploaded');
+      setTimeout(() => setSaveStatus(''), 3000);
+    } catch (error) {
+      console.error("Upload failed", error);
+      alert("Upload failed. Please try again.");
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+    
+    // Validate file size and type
+    if (file.size > 3 * 1024 * 1024) {
+      alert("File size should be less than 3MB");
+      return;
+    }
+
+    try {
+      setIsAiLoading(true);
+      const storageRef = ref(storage, `covers/${user.uid}/${Date.now()}_${file.name}`);
+      const snapshot = await uploadBytes(storageRef, file);
+      const downloadURL = await getDownloadURL(snapshot.ref);
+      setProfile({ ...profile, coverUrl: downloadURL });
+      setSaveStatus('Banner Uploaded');
+      setTimeout(() => setSaveStatus(''), 3000);
+    } catch (error) {
+      console.error("Upload failed", error);
+      alert("Upload failed. Please try again.");
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+    
+    // Validate file size and type
+    if (file.size > 2 * 1024 * 1024) {
+      alert("File size should be less than 2MB");
+      return;
+    }
+
+    try {
+      setIsAiLoading(true);
+      const storageRef = ref(storage, `logos/${user.uid}/${Date.now()}_${file.name}`);
+      const snapshot = await uploadBytes(storageRef, file);
+      const downloadURL = await getDownloadURL(snapshot.ref);
+      setProfile({ ...profile, logoUrl: downloadURL });
+      setSaveStatus('Logo Uploaded');
       setTimeout(() => setSaveStatus(''), 3000);
     } catch (error) {
       console.error("Upload failed", error);
@@ -1773,7 +2090,7 @@ if (profileData) {
                   <div className="w-8 h-8 rounded-full border border-white/10 overflow-hidden">
                     <img src={user.photoURL || ''} alt="" referrerPolicy="no-referrer" />
                   </div>
-                  <button onClick={() => signOut()} className="hidden md:block text-white/40 hover:text-white transition-colors"><LogOut className="w-4 h-4" /></button>
+                  <button onClick={() => signOut(auth)} className="hidden md:block text-white/40 hover:text-white transition-colors"><LogOut className="w-4 h-4" /></button>
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
@@ -1827,7 +2144,7 @@ if (profileData) {
                 ) : (
                   <button 
                     onClick={() => {
-                      signOut();
+                      signOut(auth);
                       setIsMenuOpen(false);
                     }}
                     className="w-full bg-white/5 text-white/60 py-4 rounded-xl text-center border border-white/10"
@@ -2359,7 +2676,7 @@ if (profileData) {
               ))}
            </nav>
 
-           <div className="p-4 m-3 bg-gradient-to-br from-brand-primary/20 to-brand-accent/20 rounded-2xl border border-white/5">
+           <div className={`p-4 m-3 bg-gradient-to-br from-brand-primary/20 to-brand-accent/20 rounded-2xl border border-white/5 ${profile?.plan === 'BUSINESS' ? 'hidden' : ''}`}>
               <div className="text-[10px] font-bold uppercase tracking-widest text-brand-primary mb-1">Scale Plan</div>
               <div className="text-xs text-white/60 mb-4">Unlock advanced demographic ROI tracking.</div>
               <button className="w-full py-2 bg-white text-black text-[10px] font-bold uppercase rounded-lg">Upgrade</button>
@@ -2623,6 +2940,74 @@ if (profileData) {
                     </div>
                 </div>
 
+                {/* Profile Architecture Guide (Highly Educational & Friendly FAQ) */}
+                <div className="glass-card p-8 border border-brand-primary/20 bg-brand-primary/[0.02] rounded-3xl font-sans text-left">
+                   <div className="flex items-center gap-3 mb-4">
+                      <Compass className="w-6 h-6 text-brand-primary" />
+                      <div>
+                         <h3 className="font-black text-white text-lg leading-none">Profile Architecture Guide</h3>
+                         <p className="text-[10px] text-white/40 uppercase tracking-widest mt-1 font-bold">Understanding your conversion headquarters</p>
+                      </div>
+                   </div>
+                   
+                   <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
+                      <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl space-y-2">
+                         <div className="flex items-center gap-2">
+                            <Zap className="w-4 h-4 text-brand-primary" />
+                            <h4 className="text-xs font-black text-white uppercase tracking-wider">What is a Dynamic Link?</h4>
+                         </div>
+                         <p className="text-xs text-white/50 leading-relaxed font-sans">
+                            Custom interactive buttons on your live profile. Use them to route visitors to scheduling tools (Calendly, WhatsApp chat), external sites, portfolio folders, or specific lead forms.
+                         </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl space-y-2">
+                         <div className="flex items-center gap-2">
+                            <Target className="w-4 h-4 text-brand-accent" />
+                            <h4 className="text-xs font-black text-white uppercase tracking-wider font-sans">Secondary Call-To-Action?</h4>
+                         </div>
+                         <p className="text-xs text-white/50 leading-relaxed font-sans font-sans">
+                            A low-friction button alongside your primary high-ticket goal. If clients aren't ready to buy yet, the secondary CTA lets them do something easier (e.g. "Get Free PDF Guide" or "Email Me").
+                         </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl space-y-2">
+                         <div className="flex items-center gap-2">
+                            <ShoppingBag className="w-4 h-4 text-[#E1306C]" />
+                            <h4 className="text-xs font-black text-white uppercase tracking-wider font-sans">Products & Services?</h4>
+                         </div>
+                         <p className="text-xs text-white/50 leading-relaxed font-sans font-sans">
+                            Showcase paid offerings, digital downloadable files, consulting sessions, or retail products. They fit perfectly under your selected business segment—easily configure them as Dynamic Links!
+                         </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl space-y-2">
+                         <div className="flex items-center gap-2">
+                            <Layers className="w-4 h-4 text-purple-400 font-sans" />
+                            <h4 className="text-xs font-black text-white uppercase tracking-wider font-sans font-sans">Social Hub vs. Blueprint?</h4>
+                         </div>
+                         <p className="text-xs text-white/50 leading-relaxed font-sans font-sans">
+                            The <strong>Social Hub</strong> is custom text links you define. The <strong>Social Blueprint</strong> represents official platform badge handles (Instagram, LinkedIn, X/Twitter, Facebook, TikTok) rendered in high contrast.
+                         </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl space-y-2">
+                         <div className="flex items-center gap-2">
+                            <Instagram className="w-4 h-4 text-[#25D366]" />
+                            <h4 className="text-xs font-black text-white uppercase tracking-wider font-sans">How Socials Display</h4>
+                         </div>
+                         <p className="text-xs text-white/50 leading-relaxed font-sans font-sans">
+                            Your Facebook, TikTok, Twitter, Instagram, and LinkedIn handles entered in standard text formats are loaded straight as beautiful, official platform buttons with action stats.
+                         </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl space-y-2">
+                         <div className="flex items-center gap-2">
+                            <MapPin className="w-4 h-4 text-brand-primary" />
+                            <h4 className="text-xs font-black text-white uppercase tracking-wider font-sans">Digital Google Maps</h4>
+                         </div>
+                         <p className="text-xs text-white/50 leading-relaxed font-sans font-sans">
+                            Your profile automatically integrates a geographic dark-styled map widget based on your Location text. Users can tap it to open the real location directly on Google Maps!
+                         </p>
+                      </div>
+                   </div>
+                </div>
+
                 <div className={`grid ${showLivePreview ? 'lg:grid-cols-[1fr_350px]' : 'lg:grid-cols-1'} gap-10`}>
                    <div className="space-y-8">
                       <div className="glass-card p-10 space-y-10">
@@ -2666,16 +3051,7 @@ if (profileData) {
                                         />
                                      </div>
                                   </div>
-                                  <div className="space-y-2">
-                                     <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Location</label>
-                                     <input 
-                                       type="text" 
-                                       placeholder="e.g. Lagos, Nigeria"
-                                       value={profile?.location || ''} 
-                                       onChange={(e) => setProfile({...profile, location: e.target.value})}
-                                       className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
-                                     />
-                                  </div>
+
                                </div>
                                <div className="space-y-2 opacity-50 cursor-not-allowed">
                                   <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Profile Handle (Unchangeable)</label>
@@ -2725,31 +3101,80 @@ if (profileData) {
                                  </div>
                                  <div className="space-y-2">
                                     <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1 flex items-center gap-2">
-                                       Background Banner URL
+                                       Background Cover / Banner
                                        <InfoTooltip text="Free: Photo/GIF. Pro: Video support (up to 3MB)." />
                                     </label>
                                     <input 
                                       type="text"
                                       value={profile?.coverUrl || ''}
                                       onChange={(e) => setProfile({...profile, coverUrl: e.target.value})}
-                                      placeholder="https://..."
-                                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                      className="hidden"
                                     />
+                                    <div className="flex flex-col gap-3 mt-2">
+                                       <div className="relative h-28 w-full bg-white/5 border border-white/10 rounded-xl overflow-hidden group">
+                                          {profile?.coverUrl ? (
+                                            profile?.coverUrl.match(/\.(mp4|webm|ogg)$/) || profile?.coverUrl.includes('video') ? (
+                                              <video src={profile.coverUrl} className="w-full h-full object-cover" muted loop autoPlay playsInline />
+                                            ) : (
+                                              <img src={profile.coverUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                            )
+                                          ) : (
+                                            <div className="w-full h-full flex items-center justify-center text-white/10 text-xs gap-2">
+                                              <Smartphone className="w-4 h-4" />
+                                              <span>No Banner Image Selected</span>
+                                            </div>
+                                          )}
+                                          <label className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+                                             <Plus className="w-6 h-6 text-white" />
+                                             <input type="file" className="hidden" accept="image/*,video/*" onChange={handleCoverUpload} />
+                                          </label>
+                                       </div>
+                                       <div className="flex justify-between items-center">
+                                          <span className="text-[10px] text-white/40">Aspect-Ratio 16:9 recommended</span>
+                                          <label className="px-3 py-1.5 bg-brand-primary/10 hover:bg-brand-primary/20 border border-brand-primary/20 text-brand-primary rounded-lg text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all">
+                                             Select banner
+                                             <input type="file" className="hidden" accept="image/*,video/*" onChange={handleCoverUpload} />
+                                          </label>
+                                       </div>
+                                    </div>
+
                                  </div>
                               </div>
                              
                              {profile?.plan !== 'FREE' && (
                                <div className="space-y-2">
                                   <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1 flex items-center gap-2">
-                                     Business Logo URL (Pro/Business Only)
+                                     Business Brand Logo (Pro/Business Only)
                                   </label>
                                   <input 
                                     type="text"
                                     value={profile?.logoUrl || ''}
-                                    onChange={(e) => setProfile({...profile, logoUrl: e.target.value})}
-                                    placeholder="https://..."
-                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                    className="hidden"
                                   />
+                                  <div className="flex items-center gap-4 mt-3">
+                                     <div className="w-14 h-14 bg-white/5 border border-white/10 rounded-xl flex items-center justify-center overflow-hidden relative group shrink-0 font-sans">
+                                        {profile?.logoUrl ? (
+                                          <img src={profile.logoUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                        ) : (
+                                          <ShoppingBag className="w-6 h-6 text-white/15" />
+                                        )}
+                                        <label className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+                                           <Plus className="w-4 h-4 text-white" />
+                                           <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
+                                        </label>
+                                     </div>
+                                     <div className="flex-1 flex justify-between items-center bg-white/[0.02] border border-white/5 p-3 rounded-xl font-sans">
+                                        <div className="text-[10px] text-white/40 text-left">
+                                           <p className="font-bold text-white/60">Upload business logo</p>
+                                           <p>PNG or JPG format supported</p>
+                                        </div>
+                                        <label className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all shrink-0">
+                                           Upload Logo
+                                           <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
+                                        </label>
+                                     </div>
+                                  </div>
+                                  <input type="hidden" value={profile?.logoUrl || ''} />
                                 </div>
                              )}
                           </div>
@@ -2768,9 +3193,13 @@ if (profileData) {
                              <textarea 
                                value={profile?.bio || ''}
                                onChange={(e) => setProfile({...profile, bio: e.target.value})}
+                               maxLength={500}
                                placeholder="Tell your audience who you are and what you offer..."
                                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors h-24 resize-none"
                              />
+                             <div className="flex justify-end px-1 text-[10px] font-mono text-white/40">
+                                <span>{(profile?.bio || '').length} / 500 characters</span>
+                             </div>
                           </div>
 
                           <div className="space-y-6">
@@ -2796,11 +3225,42 @@ if (profileData) {
                                      value={profile?.linkedin || ''}
                                      onChange={(e) => setProfile({...profile, linkedin: e.target.value})}
                                      placeholder="e.g. alexrivera"
-                                     className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
-                                   />
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                  />
+                               </div>
+                               <div className="space-y-2">
+                                  <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Twitter / X (@handle)</label>
+                                  <input 
+                                    type="text"
+                                    value={profile?.twitter || ''}
+                                    onChange={(e) => setProfile({...profile, twitter: e.target.value})}
+                                    placeholder="e.g. alex_x"
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                  />
+                               </div>
+                               <div className="space-y-2">
+                                  <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Facebook (profile/page name)</label>
+                                  <input 
+                                    type="text"
+                                    value={profile?.facebook || ''}
+                                    onChange={(e) => setProfile({...profile, facebook: e.target.value})}
+                                    placeholder="e.g. alexrivera.page"
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                  />
+                               </div>
+                               <div className="space-y-2 md:col-span-2">
+                                  <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">TikTok (@handle)</label>
+                                  <input 
+                                    type="text"
+                                    value={profile?.tiktok || ''}
+                                    onChange={(e) => setProfile({...profile, tiktok: e.target.value})}
+                                    placeholder="e.g. alex_tok"
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                  />
+                               </div>
+                               
                                 </div>
                              </div>
-                          </div>
 
                           {/* Theme Selection */}
                           <div className="space-y-6">
@@ -2941,6 +3401,26 @@ if (profileData) {
                                 </div>
                              </div>
 
+                          {/* Map & Location Settings */}
+                          <div className="space-y-6 pt-6 border-t border-white/5">
+                             <div>
+                                <h3 className="font-bold text-lg mb-2 flex items-center gap-2">
+                                   <MapPin className="w-5 h-5 text-brand-primary" /> Map & Location
+                                </h3>
+                                <p className="text-xs text-white/40">Enter your physical business location to render a dynamic, dark-styled interactive Google Map on your live card.</p>
+                             </div>
+                             <div className="space-y-2">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 px-1">Location Address</label>
+                                <input 
+                                  type="text" 
+                                  placeholder="e.g. Lagos, Nigeria"
+                                  value={profile?.location || ''} 
+                                  onChange={(e) => setProfile({...profile, location: e.target.value})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-brand-primary outline-none text-white transition-colors"
+                                />
+                             </div>
+                          </div>
+
                          {/* Social Links Settings */}
                          <div className="space-y-6">
                             <div>
@@ -2983,20 +3463,21 @@ if (profileData) {
                             <button 
                               onClick={async () => {
                                 try {
-                                  const { error } = await supabase.from('profiles').update({
+                                  const path = `profiles/${profile.handle}`;
+                                  const pRef = doc(db, "profiles", profile.handle);
+                                  await setDoc(pRef, {
                                     ...profile,
-                                    updated_at: new Date().toISOString()
-                                  }).eq('id', profile.id);
-                                  if (error) throw error;
+                                    updatedAt: serverTimestamp()
+                                  }, { merge: true });
                                   setSaveStatus('Profile updated successfully');
                                   setTimeout(() => setSaveStatus(null), 3000);
                                 } catch (e) {
-                                  handleDbError(e, OperationType.WRITE, `profiles/${profile.handle}`);
+                                  handleFirestoreError(e, OperationType.WRITE, `profiles/${profile.handle}`);
                                 }
                               }}
                               className="px-6 py-3 bg-brand-primary text-white rounded-xl font-bold flex items-center gap-2 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-brand-primary/20"
                             >
-                               <Save className="w-4 h-4" /> Save Configuration
+                               <Save className="w-4 h-4" /> Save Profile
                             </button>
                          </div>
                       </div>
@@ -3100,7 +3581,7 @@ if (profileData) {
                       onClick={() => handleCreateCheckout(subscription.planId)} 
                       className="px-8 py-4 bg-white/5 border border-white/10 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-white/10 transition-all"
                     >
-                      Stripe Portal
+                      Paystack Portal
                     </button>
                   </div>
                 )}
