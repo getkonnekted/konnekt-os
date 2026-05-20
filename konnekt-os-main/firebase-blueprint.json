@@ -1,0 +1,112 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Core identity and configuration for a Konnekt.ng profile.",
+      "type": "object",
+      "properties": {
+        "handle": { "type": "string", "description": "Unique username handle." },
+        "displayName": { "type": "string" },
+        "bio": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "theme": { "type": "string", "enum": ["DARK", "LIGHT", "BRAND", "MINIMAL"] },
+        "intent": { "type": "string", "enum": ["SERVICE", "COMMERCE", "CORPORATE", "CREATOR"] },
+        "primaryCTA": { "type": "string" },
+        "primaryLink": { "type": "string" },
+        "ownerId": { "type": "string", "description": "UID of the owner." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["handle", "intent", "ownerId", "createdAt", "updatedAt"]
+    },
+    "DynamicLink": {
+      "title": "Secondary Link",
+      "description": "Additional links or social handles on a profile.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "type": { "type": "string", "enum": ["social", "custom", "product"] },
+        "order": { "type": "integer" }
+      },
+      "required": ["title", "url", "type", "order"]
+    },
+    "AnalyticsEvent": {
+      "title": "Analytics Event",
+      "description": "Captured signals for the Pulse dashboard.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["view", "action"] },
+        "target": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "type", "timestamp"]
+    },
+    "Lead": {
+      "title": "Lead",
+      "description": "Captured business enquiries and contact intents.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "intent": { "type": "string" },
+        "message": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "value": { "type": "number" }
+      },
+      "required": ["name", "timestamp"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "User subscription details and tier.",
+      "type": "object",
+      "properties": {
+        "planId": { "type": "string", "enum": ["FREE", "PRO", "BUSINESS"] },
+        "status": { "type": "string" },
+        "stripeCustomerId": { "type": "string" },
+        "currentPeriodEnd": { "type": "string", "format": "date-time" }
+      },
+      "required": ["planId", "status"]
+    },
+    "TwoFactorAuth": {
+      "title": "Two-Factor Authentication",
+      "description": "Security configuration for 2FA.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secret": { "type": "string", "description": "TOTP shared secret (Encrypted or server-only)." },
+        "backupCodes": { "type": "array" }
+      },
+      "required": ["enabled"]
+    }
+  },
+  "firestore": {
+    "/profiles/{profileId}": {
+      "schema": "UserProfile",
+      "description": "Public profile root documents."
+    },
+    "/profiles/{profileId}/links/{linkId}": {
+      "schema": "DynamicLink",
+      "description": "Sub-links for a profile."
+    },
+    "/analytics/{eventId}": {
+      "schema": "AnalyticsEvent",
+      "description": "Global event stream for tracking ROI."
+    },
+    "/profiles/{profileId}/leads/{leadId}": {
+      "schema": "Lead",
+      "description": "Private lead vault for a user."
+    },
+    "/users/{userId}/private/billing": {
+      "schema": "Subscription",
+      "description": "Private subscription data."
+    },
+    "/users/{userId}/private/security": {
+      "schema": "TwoFactorAuth",
+      "description": "Sensitive security configuration."
+    }
+  }
+}
